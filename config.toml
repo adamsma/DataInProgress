@@ -5,8 +5,9 @@ defaultContentLanguage = "en-us"
 title = "Data in Progress"
 theme = "hugo-tranquilpeak-theme"
 # disqusShortname = "hugo-tranquilpeak-theme"
-# googleAnalytics = "UA-123-45"
-paginate = 7
+googleAnalytics = "UA-137925261-2"
+
+paginate = 10
 canonifyurls = true
 
 ignoreFiles = ["\\.Rmd$", "\\.Rmarkdown$", "_files$", "_cache$"]
