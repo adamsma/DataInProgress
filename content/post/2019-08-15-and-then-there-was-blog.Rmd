@@ -1,9 +1,0 @@
----
-title: And Then There Was Blog
-author: Marcus Adams
-date: '2019-08-15'
-slug: and-then-there-was-blog
-categories:
-  - introduction
-tags: []
----

@@ -1,0 +1,16 @@
+.main-content-wrap {
+	max-width: 775px
+}
+
+.post-header-cover .post-header .post-title {
+	max-width: 775px
+}
+
+/* stop images from being zoomed and truncated */
+.postShorten-thumbnailimg > img {
+	max-width: 100%
+}
+
+ul {
+	margin: .5em 0 .5em 0
+}
