@@ -1,0 +1,369 @@
+---
+title: Adventures in Reactivity
+author: Marcus Adams
+date: '2019-08-30'
+draft: true
+categories:
+  - r
+  - shiny
+tags:
+  - r
+  - shiny
+  - reactivity
+slug: adventures-in-reactivity
+keywords:
+  - tech
+---
+
+Stealing shamelessly isn’t plagiarism when you work for the same company.
+
+<!--more--> 
+
+It’s called “leveraging” others’ work. This is doubly true when you were the content author in the first place. 
+
+## The Call for Adventure
+
+For my first actual post, I decided to rehash an article I originally wrote awhile back to help my group understand reactivity. At the time, we were in the midst of creating our first major Shiny app. I was by no means a master of reactivity then (nor am I claiming to be now), but during code reviews a number of anti-patterns kept showing up. Many of these I’ve also seen recently in code posted in StackOverflow questions as well. 
+
+As I said, I wrote this awhile back so that’s why you might notice some of the illustrations are from the original `reactlog` and not the new version on !(CRAN)[cran.org/source/reactlog2]. 
+
+
+
+
+## The Adventures Begins
+
+To start I would suggest reading these two articles from RStudio. 
+
+<span></span>
+
+* [Reactivity - An Overview](https://shiny.rstudio.com/articles/reactivity-overview.html)
+* [How to Understand Reactivity in R](https://shiny.rstudio.com/articles/understanding-reactivity.html)
+
+Frankly, for me, it took a couple of readings to fully follow the explanations (particularly for the second article), but understanding reactivity better has made it easier to reason through my Shiny code. This has been particularly useful when debugging. Moreover, it helps in being able to follow what's going on in a reactivity log.
+
+## The Many Roads of Reactivity
+
+Did you read the articles? Good. As it mentions *"In Shiny, there are three kinds of objects in reactive programming: reactive sources, reactive conductors, and reactive endpoints"*. This is how I think about each of them.
+
+### Reactive Sources
+
+I think about these as defined values, or moreover, variables to which a specific value is directly assigned. The values stored in these objects are **not** typically calculated. They are set to a specific value or specifically incremented. These objects have to explicitly updated by code. To that end, there are, in my mind, three implementations of reactive sources, which are all updated differently.
+
+Inputs
+
+: These are values that originate from the UI (e.g. `input$myInput`). They are updated either via the UI (e.g. click a button) or through special function calls: `updatedSelectInput(session = "mysession", "myChoices", choices = newChoices)`
+
+
+ReactiveValues
+
+: These are defined via a call to `reactiveValues(...)`, thereby creating a list like object. Values are retrieved and updated similar to accessing and assigning to a list (i.e. via the `$<-` operator). 
+
+
+ReactiveVal
+
+: Instead of creating a list of reactive objects, the `reactiveVal()` creates a single reactive value object. An important distinction is that these are updated via a function-like call (`myReactVal(2)`) and not via the `<-` operator. Using the assignment operator redefines the variable. The code`myReactVal <- 4`  would actually remove the reactive element of the variable and transform it to a constant value. 
+
+
+
+### Reactive Conductors
+
+These are the reactive objects created using either `reactive(x)` or `eventReactive(eventExpr, valueExpr)`. These are *calculated values*. They are recalculated when any of their inputs change. Event reactives are a special case of reactives. They are equivalent to having the combination of the `eventExpr` and `isolate(valueExpre)` as an input to `reactive(x)`. When defining these, you are not telling Shiny what to assign to these values, but instead how Shiny should calculate these values when needed (a recipe of sorts). You then leave it to Shiny to figure out when it is appropriate to recalculate. 
+
+### Reactive Endpoints
+
+As the name says, these are endpoints and should be thought of as the end result of a calculation, the finished product. In programming terms, these are used to create side effects (i.e. they don't return a value). The major use of these are to affect the UI. There are two implementations of reactive endpoints to consider:
+
+Outputs
+
+: These are the assignment to a member of the `output` object and usually involve a call to a function of the format `renderXYZ`. For example, `output$myPlot <- renderPlot(...)`.  Here your objective is to give Shiny a series of steps on *how* to create the output, *not* when. If you provide the expression on how a output object is created, Shiny will figure out when it needs to be refreshed.
+
+Observe and ObserveEvent
+
+: Analogous to reactives, `observeEvent` is just a special case of an `observe`. In actuality, assigning to an output creates an observer behind the scenes (with extra instructions to communicate with the browser).  While observers are the closest thing Shiny has to try to let you control when a side effect happens, the expressions should still be thought of as a series of steps for Shiny to follow when it deems necessary. Essentially "Hey Shiny, here are some steps to follow. Re-execute when you deem something has changed."
+
+Where the trouble starts, and what I will focus on for the rest of this document, is when we try to use observers to force the update of a variable. Observers can be used to update reactive values, but even this should be done carefully as this may inadvertently break the dependency chain. 
+
+## The Fight Scene
+
+What does the following code do?
+
+```r
+observeEvent(batchNum,{
+    
+    output$labelText <- sprintf("The batch number is %s", batchNum())
+        
+})
+```
+
+Naively, this could be read as "Every time the batch number changes, update the output label with the new batch number."
+
+What in fact this does is "Every time the batch number changes, create a new output object for the label which will use the batch number.", Every time the batch number changes, a whole new object is created.
+
+After selecting a single batch, we have two copies of the output object. One from when the code was initialized and one from when a batch was selected:
+
+Going back to our first, simple example what we really want is just
+
+```r
+    output$labelText <- sprintf("The batch number is %s", batchNum())
+```
+
+No observer is needed! By assigning to the output variable we are telling Shiny "Here's how to create the `labelText`. It depends on a reactive `batchNum`. Keep track of when `batchNum` changes and update `labelText` accordingly." 
+
+
+Of course, one could say "Hey, it works. Ain't broke don't fix it." Sure, there's some extra variables sitting in memory, but we've got plenty of memory, right? Where I've seen code really start to run into trouble is when this habit bleeds into the using `reactive` and `eventReactive` within observer blocks. This code tends to not outright crash, but often doesn't behave as expected. 
+
+## Back Dat Donkey Up
+
+Below is code for a simple Shiny app. The goal is the app generates a list of random numbers. When a button is clicked, the length of the list increases. A text statement reports the sum and size of the list. A histogram should show the distribution of the random numbers and its title should say how many numbers are shown in the distribution. Since we know action buttons start with a value of 0, we initialize the list to a single value.
+
+```r
+library(shiny)
+
+ui <- fluidPage(
+   
+   titlePanel("Reacting to Adventure"),
+   
+   sidebarLayout(
+      sidebarPanel(
+         actionButton("go", "Increase")
+      ),
+      
+      mainPanel(
+         fluidRow(
+            textOutput("msg"),
+            plotOutput("rndHist")
+        )
+      )
+   )
+)
+
+server <- function(input, output) {
+    
+    rndVals <- reactive(rnorm(1), label = "Value List")
+    
+    observeEvent(input$go, label = "Increase Values", {
+        
+        rndVals <- reactive(rnorm(input$go+1), label = "Value List")
+        output$msg <- renderText(sprintf("The sum of the %i numbers is %f", input$go+1, sum(rndVals())))
+        
+    })
+    
+    output$rndHist <- renderPlot({
+        hist(rndVals(),
+             main = sprintf("Histogram of %i", NROW(rndVals()))
+        )
+    })
+    
+}
+
+shinyApp(ui, server)
+```
+
+Clicking the button a few times to get a total list of 5 random numbers, the UI looks appears as follows:
+![](img/2019/adventures-in-reactivityUI Observe Event Error Local Assign.png)
+
+The text updated but the histogram didn't! "Oh, I know. I just need to use the `<<-` operator to update the rndVals in the parent environment. That should solve it, right?"
+
+```r
+server <- function(input, output) {
+    
+    rndVals <- reactive(rnorm(1), label = "Value List")
+    
+    observeEvent(input$go, label = "Increase Values", {
+        
+        rndVals <<- reactive(rnorm(input$go+1), label = "Value List")
+        output$msg <- renderText(sprintf("The sum of the %i numbers is %f", input$go+1, sum(rndVals())))
+        
+    })
+    
+    output$rndHist <- renderPlot({
+        hist(rndVals(),
+             main = sprintf("Histogram of %i", NROW(rndVals()))
+        )
+    })
+    
+}
+```
+
+![test](https://res.cloudinary.com/datainprogress/image/upload/v1566881580/2019/adventures-in-reactivity/UI_Observe_Event_Error_Global_Assign_sjwya1.png)
+
+"Oh, come on! I even paid attention to scoping rules!"" Let's take a look at the reactivity map to see if can gain any insight.
+![Notice the use of the `label =` argument makes the reactivity map easier to follow](img/2019/adventures-in-reactivityObserve Event Error Local Assign.png)
+
+The first question that should jump out is why are there 5 different 'Value List' objects and 4 'output$msg' objects? With a Shiny app, code does not execute in a linear, sequential fashion as it would in a typical R script. When you define your server function, you are giving Shiny a set instructions to execute *when it deems necessary*. 
+
+What this means is when you source the code, all of the instructions are read in and the app is initialized. The first `rndVals` and `output$rndHist` are initialized. Remember, assigning to output creates an observer (which is why all the output objects and the 'Increase Values' observer object use the same symbol). During this initialization, the observer for the histogram is linked to the initialized version of the 'Value List'. 
+
+The `eventExpr` to the observe block, `input$go`, as an action button is initialized to a special type of zero value. This special value, however, does not trigger the `observeEvent` statement and as a result `output$msg` is not created during initialization.
+
+Just like with the repeated output objects in the Batch Analyzer module, each time the button is clicked (i.e. `input$go` changes) the handler expression from the observer is executed. Again in this case, each time this is executed a whole new 'Value List' object and a whole new output message are defined. After clicking the button 4 times (to get a total of 5 values), there are 4 additional 'Value List' and 4 additional output message objects created. Since `output$rndHist` isn't redefined, it is still linked to the original version of the "Value List' created during initialization - the one that isn't linked to the action button!
+
+"Okay, I'll switch to using an `observe(...)` statement instead. It'll execute when the app is initialized and it gives Shiny more freedom to figure out when things should update!"
+
+```r
+server <- function(input, output) {
+    
+    rndVals <- reactive(rnorm(1), label = "Value List")
+    
+    observe(label = "Increase Values", {
+        
+        rndVals <<- reactive(rnorm(input$go+1), label = "Value List")
+        output$msg <- renderText(sprintf("The sum of the %i numbers is %f", input$go+1, sum(rndVals())))
+        
+    })
+    
+    output$rndHist <- renderPlot({
+        hist(rndVals(),
+             main = sprintf("Histogram of %i", NROW(rndVals()))
+        )
+    })
+    
+}
+```
+Huzzah! The app functions as intended! Everything updates!
+![](img/2019/adventures-in-reactivity2019/adventures-in-reactivityUI Observe Global Assign.png)
+
+Or does it?
+![](img/2019/adventures-in-reactivity2019/adventures-in-reactivityObserve Global Assign.png)
+
+There aren't any duplicates for the 'Value List' or output message. The output message and the histogram are linked to the same 'Value List' instance. But what about the 'Increase Value' observer sitting down in the lower corner all by its lonesome? Shouldn't it depend on `input$go`? Let's take a look what happens when we tell the observe block to ignore initialization (i.e. `observe(x, suspended = TRUE)`).
+
+```r
+server <- function(input, output) {
+
+    rndVals <- reactive(rnorm(1), label = "Value List")
+
+    observe(label = "Increase Values", {
+
+        rndVals <<- reactive(rnorm(input$go+1), label = "Value List")
+        output$msg <- renderText(sprintf("The sum of the %i numbers is %f", input$go+1, sum(rndVals())))
+
+    }, suspended = TRUE)
+
+    output$rndHist <- renderPlot({
+                        hist(rndVals(),
+                             main = sprintf("Histogram of %i", NROW(rndVals()))
+                        )
+    })
+
+}
+```
+
+Don't run it during initialization, but other than that we're still letting Shiny decided when it should execute the observer block. Apparently, it has decided to never run that block. 
+![After clicking the button 4 times, nothing has updated...](img/2019/adventures-in-reactivity2019/adventures-in-reactivityUI Observe Suspended Global Assign.png)
+
+As we saw from the reactivity map, the observer has no reactive dependencies. So if it doesn't execute during initialization, it never executes. Before, the expressions in the observer execute during initialization, redefining `rndVals` and defining the steps to create the message. Since this all takes place during initialization, the histogram and message get linked to the same 'Value List.' `rndVals` and `output$msg` have established reactive dependencies on `input$go` so they update appropriately, but no reactive dependency is assigned to the 'Increase Values' observer block. As a result, the observer block is never executed again (nor does it need to!). 
+
+Now let's get back to the issue of using observers to update reactive values (and why we should be careful when doing so). If we are updating a reactive value within a observer block, we certainly need the observe block to execute more than just during initialization. Suppose we want to add a reactive value to our sample app that keeps track of how many random values should be in the list.
+
+
+```r
+server <- function(input, output) {
+
+    rndCt <- reactiveVal(0, label = "Value Count")
+    rndVals <- reactive(rnorm(input$go + 1), label = "Value List")
+
+    observe(label = "Increase Values", {
+
+        rndCt(isolate(rndCt()+1))
+        output$msg <- renderText(sprintf("The sum of the %i numbers is %f", input$go + 1, sum(rndVals())))
+        
+    })
+    
+    output$rndHist <- renderPlot({
+        hist(rndVals(), breaks = length(rndVals()),
+             main = sprintf("Histogram of %i", rndCt())
+        )
+    })
+
+}
+```
+
+We took the assignment to `rndVals` out of the observer, but we kept message in there because it was really only the reactive that was giving us trouble. We use `isolate` to avoid an infinite loop (the observer would otherwise depend on `rndCt` and in turn update it). The aims is that the observer block should run only when either `input$go` or `rndVals` changes. 
+
+![](img/2019/adventures-in-reactivity2019/adventures-in-reactivityUI Observe Reactive Val.png)
+
+Clicking 'Increase' seems to update everything except the histogram title. What's more frustrating is that when you add some debug print statements to check the values, everything seems to work!
+
+```r
+server6 <- function(input, output) {
+    
+    rndCt <- reactiveVal(0, label = "Value Count")
+    rndVals <- reactive(rnorm(input$go + 1), label = "Value List")
+    
+    observe(label = "Increase Values", {
+        
+        rndCt(isolate(rndCt()+1))
+        print(paste("rndCt: ", rndCt()))
+        print(paste("Input + 1: ", input$go + 1))
+        
+        output$msg <- renderText(sprintf("The sum of the %i numbers is %f", rndCt(), sum(rndVals())))
+        
+    })
+    
+    output$rndHist <- renderPlot({
+        hist(rndVals(), breaks = length(rndVals()),
+             main = sprintf("Histogram of %i", rndCt())
+        )
+    })
+    
+}
+```
+![](img/2019/adventures-in-reactivity2019/adventures-in-reactivityUI Observe With Print Reactive Val.png)
+
+Since the assignment to `output$msg` creates it own observer, no reactive dependency is imparted to the 'Increase Values' observer. By adding the print statements, we create a reactive dependency for the observer. As a result, `rndCt` updates as expected. When using observers to update reactive values, explicitly call out the dependencies either using `observeEvent` or by placing them at the top of the expression when calling `observe`.  Finally, what we want our app to look like is this.
+
+```r
+server <- function(input, output) {
+    
+    rndCt <- reactiveVal(0, label = "Value Count")
+    rndVals <- reactive(rnorm(input$go + 1), label = "Value List")
+    
+    observe(label = "Increase Values", {
+        
+        #trigger when
+        input$go
+        rndVals()
+        
+        rndCt(isolate(rndCt()+1))
+        
+    })
+    
+    output$msg <- renderText(sprintf("The sum of the %i numbers is %f", rndCt(), sum(rndVals())))
+    
+    output$rndHist <- renderPlot({
+        hist(rndVals(), breaks = length(rndVals()),
+             main = sprintf("Histogram of %i", rndCt())
+        )
+    })
+    
+}
+```
+
+![This gives us the nice reactivity map we were hoping for!](img/2019/adventures-in-reactivity2019/adventures-in-reactivityFinal React Map.png)
+
+## Wrapping Up Loose Ends
+
+As we've seen, even when an app appears to be working correctly, the reactivity maps can be useful in showing that behind the scenes things may not be working as we intended. Of course given the complexity of the PPx Dashboard, these maps are only tractable when created for smaller sample apps which use the modules (*coughwritesampleappsforyourmodulescough*).  Generally speaking, reactive conductors should not be a terminating node when tracing dependency. Moreover, they are intended to be intermediary nodes (hence "conductors") and therefore something else should depend on them!
+
+<!--example reactives no end point--> 
+
+Let's think back to the intention of each of the reactive objects. Since the filtered tables are actually calculated values (yes, filtering is a function), we want to use a reactive conductor (i.e. `reactive(..)` or `eventReactive(...)`) instead of a reactive source(i.e. `reactiveValues(...)`). This will allow us to make a more explicit connection between them and the input data. The reactive conductors can both be a dependent and have dependents. When we store data in a reactive value and use an `observeEvent` block, we are telling Shiny "Look, I'll handle this one. Only update it when this explicit thing happens." With using `reacitve`, we tell Shiny "Hey, you know what all goes into calculating this thing (or 'jawn' if the Shiny server is from Philadelphia). Figure out when it needs to be updated and deal with it yourself."
+
+
+On the right side you see a couple of terminating reactive conductor nodes. Now, not all reactives *have* to have a downstream dependent, but the intent of reactive conductors to allow these values to be used elsewhere in the code. Are these values being used somewhere else or are these just superfluous calculations (possibly holdover from an old version)? There may be legitimate uses of these, but it's worth taking a closer look.
+
+
+## Lessons of Our Heroic Adventure
+
+* Avoid assigning reactives and outputs within observe statements.
+* Focus on telling Shiny how, not when
+* Reactivity maps are our friendslll
+* Be biased towards using `reactive(...)` when storing a calculated value
+* Don't Panic
+
+## TLDR{#TLDR}
+{{< alert info >}}
+Shiny works best when you focus on telling it *how* to do things, not *when*. 
+{{< /alert >}}
+
